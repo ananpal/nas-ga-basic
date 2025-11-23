@@ -70,11 +70,11 @@ class GeneticAlgorithm:
             criterion = nn.CrossEntropyLoss()
             optimizer = AdamW(model.parameters(), lr=0.001)
             
-            # Quick training
             best_acc = 0
             patience = 10
             step = 1
             best_epoch = 1
+            
             for epoch in range(1, epochs+1):
                 model.train()
                 for inputs, labels in train_loader:
@@ -85,16 +85,13 @@ class GeneticAlgorithm:
                     loss.backward()
                     optimizer.step()
             
-                # Evaluation
                 model.eval()
                 correct = 0
-                # total = 0
                 with torch.no_grad():
                     for inputs, labels in val_loader:
                         inputs, labels = inputs.to(device), labels.to(device)
                         outputs = model(inputs)
                         _, predicted = torch.max(outputs.data, 1)
-                        # total += labels.size(0)
                         correct += (predicted == labels).sum().item()
             
                 accuracy = correct / len(val_loader.dataset)
@@ -104,20 +101,57 @@ class GeneticAlgorithm:
                     best_epoch = epoch
                 else:
                     step += 1
+                
                 if step >= patience:
                     break
+
+            conv_params = 0
+            fc_params = 0
+            conv_compute = 0  
+            fc_compute = 0    
+
+            for name, module in model.named_modules():
+                if isinstance(module, nn.Conv2d):
+                    params = sum(p.numel() for p in module.parameters())
+                    conv_params += params
+
+                    try:
+                        out_h = 32 // (architecture.genes.get("pool_stride", 1))
+                        out_w = 32 // (architecture.genes.get("pool_stride", 1))
+                        spatial_area = out_h * out_w
+                    except:
+                        spatial_area = 32 * 32  # fallback
+
+                    conv_compute += params * spatial_area
+
+                elif isinstance(module, nn.Linear):
+                    params = sum(p.numel() for p in module.parameters())
+                    fc_params += params
+                    fc_compute += params
             
-            # Calculate model complexity penalty
-            num_params = sum(p.numel() for p in model.parameters())
-            complexity_penalty = num_params / 1e6  # Normalize
+            C_conv = conv_compute
+            C_fc = fc_compute
+            
+            C_total = C_conv + C_fc
+            C_ref = 1e8 
+
+            lambda_complexity = 0.01
+            gamma_fc = 0.5 
+            
+            complexity_penalty = lambda_complexity * ((C_conv + gamma_fc * C_fc) / C_ref)
+
+            print(f"[FIT] acc={best_acc:.4f}, conv_params={conv_params}, fc_params={fc_params}, "
+                f"C_conv={C_conv}, C_fc={C_fc}, penalty={complexity_penalty:.6f}, "
+                f"fitness={best_acc - complexity_penalty:.6f}")
+
 
             del model, inputs, outputs, labels
-            torch.cuda.empty_cache()
-            
-            # Fitness = accuracy - lambda * complexity
+            if device.type == 'cuda':
+                torch.cuda.empty_cache()
+
             architecture.accuracy = best_acc
             architecture.best_epoch = best_epoch
-            architecture.fitness = best_acc - 0.01 * complexity_penalty
+            architecture.fitness = best_acc - complexity_penalty
             
             return architecture.fitness
             
@@ -126,16 +160,44 @@ class GeneticAlgorithm:
             architecture.fitness = 0
             architecture.accuracy = 0
             return 0
-    
+
     def selection(self):
-        """Tournament selection"""
-        tournament_size = 3
+        """Roulette-wheel selection"""
         selected = []
+        fitness_values = [arch.fitness for arch in self.population]
+        min_fitness = min(fitness_values)
         
+        if min_fitness < 0:
+            offset = abs(min_fitness) + 0.01
+            shifted_fitness = [f + offset for f in fitness_values]
+        else:
+            shifted_fitness = fitness_values
+        
+        total_fitness = sum(shifted_fitness)
+
+        probs = [f / total_fitness for f in shifted_fitness]
+
+        print("[SELECTION] fitness:", fitness_values)
+        print("[SELECTION] shifted:", shifted_fitness)
+        print("[SELECTION] probs:", probs)
+        
+        if total_fitness == 0 or total_fitness < 1e-10:
+            selected = random.choices(self.population, k=self.population_size)
+            return selected
+        
+        cumulative_probs = []
+        cumsum = 0
+        for fitness in shifted_fitness:
+            cumsum += fitness / total_fitness
+            cumulative_probs.append(cumsum)
+        
+        # Select individuals using roulette-wheel
         for _ in range(self.population_size):
-            tournament = random.sample(self.population, tournament_size)
-            winner = max(tournament, key=lambda x: x.fitness)
-            selected.append(winner)
+            r = random.random()
+            for i, cum_prob in enumerate(cumulative_probs):
+                if r <= cum_prob:
+                    selected.append(deepcopy(self.population[i]))
+                    break
         
         return selected
     
@@ -240,7 +302,7 @@ class GeneticAlgorithm:
             print(f"Best overall: {self.best_architecture}", flush=True)
             
             # Selection
-            print(f"\nPerforming tournament selection of total population: {self.population_size} ...", flush=True)
+            print(f"\nPerforming roulette-wheel selection of total population: {self.population_size} ...", flush=True)
             selected = self.selection()
             
             # Crossover and Mutation

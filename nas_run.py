@@ -14,7 +14,14 @@ if not os.path.exists(os.path.join(parent, 'outputs')):
 all_logs = [i for i in os.listdir(os.path.join(parent, 'outputs')) if 'log' in i]
 os.mkdir(os.path.join(parent, 'outputs', f'run_{len(all_logs)+1}'))
 
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+if torch.cuda.is_available():
+    device = torch.device('cuda')
+elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+    device = torch.device('mps')
+    print("using metal")
+else:
+    device = torch.device('cpu')
 
 sys.stdout = open(os.path.join(parent, 'outputs', f'run_{len(all_logs)+1}', f'nas_run.log'), 'w')
 
